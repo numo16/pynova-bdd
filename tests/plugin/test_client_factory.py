@@ -17,7 +17,9 @@ _FAKE = FakeNovaAct()
 _KWARGS = []
 
 def _novaact(**kwargs):
-    _KWARGS.append({k: (v if isinstance(v, (str, bool, type(None))) else repr(v)) for k, v in kwargs.items()})
+    _KWARGS.append(
+        {k: (v if isinstance(v, (str, bool, type(None))) else type(v).__name__) for k, v in kwargs.items()}
+    )
     return _FAKE.factory(**kwargs)
 
 @pytest.fixture(autouse=True)
@@ -55,7 +57,12 @@ def test_api_key_auth(stub_project: pytest.Pytester, monkeypatch: pytest.MonkeyP
     stub_project.runpytest().assert_outcomes(passed=1)
     kwargs = json.loads((stub_project.path / "kwargs.json").read_text())
     assert kwargs == [
-        {"starting_page": "https://shop.example.com", "headless": False, "nova_act_api_key": "secret-key"}
+        {
+            "starting_page": "https://shop.example.com",
+            "headless": False,
+            "state_guardrail": "NavigationFence",
+            "nova_act_api_key": "secret-key",
+        }
     ]
 
 
@@ -64,7 +71,12 @@ def test_iam_auth_uses_session_workflow(stub_project: pytest.Pytester) -> None:
     stub_project.runpytest().assert_outcomes(passed=1)
     kwargs = json.loads((stub_project.path / "kwargs.json").read_text())
     assert kwargs == [
-        {"starting_page": "https://shop.example.com", "headless": False, "workflow": "WORKFLOW"}
+        {
+            "starting_page": "https://shop.example.com",
+            "headless": False,
+            "state_guardrail": "NavigationFence",
+            "workflow": "WORKFLOW",
+        }
     ]
 
 

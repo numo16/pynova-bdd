@@ -30,16 +30,16 @@ def test_then_without_a_verdict_is_an_error_not_a_pass(project: NovaProject) -> 
     project.setup(feature=THEN_FEATURE, conftest_extra='_FAKE.on("cart shows", None)\n')
     result = project.run()
     result.assert_outcomes(failed=1)
-    result.stdout.fnmatch_lines(["*NovaVerificationError: Nova Act did not return a yes/no verdict*"])
+    result.stdout.fnmatch_lines(["*NovaVerificationError: Nova Act did not return a verdict*"])
 
 
-def test_then_with_non_boolean_verdict_is_an_error(project: NovaProject) -> None:
+def test_then_with_unknown_verdict_is_an_error(project: NovaProject) -> None:
     project.setup(
-        feature=THEN_FEATURE, conftest_extra='_FAKE.on("cart shows", {"passed": "yes", "evidence": ""})\n'
+        feature=THEN_FEATURE, conftest_extra='_FAKE.on("cart shows", {"verdict": "maybe", "evidence": []})\n'
     )
     result = project.run()
     result.assert_outcomes(failed=1)
-    result.stdout.fnmatch_lines(["*NovaVerificationError: Nova Act returned an invalid verdict*"])
+    result.stdout.fnmatch_lines(["*NovaVerificationError: Nova Act did not return a verdict*"])
 
 
 def test_act_error_becomes_readable_failure(project: NovaProject) -> None:
@@ -123,7 +123,7 @@ def test_docstring_and_datatable_are_appended(project: NovaProject) -> None:
         ''',
     )
     project.run().assert_outcomes(passed=1)
-    prompts = [arg for method, arg in project.methods() if method == "act"]
+    prompts = [arg for method, arg in project.steps() if method == "act"]
     assert prompts[0] == (
         "I fill in the address form with\n\n"
         "Use this data:\n| field | value |\n|---|---|\n| street | 1 Main St |"
@@ -146,7 +146,7 @@ def test_scenario_outline_values_are_substituted(project: NovaProject) -> None:
         """
     )
     project.run().assert_outcomes(passed=2)
-    prompts = [arg for method, arg in project.methods() if method == "act"]
+    prompts = [arg for method, arg in project.steps() if method == "act"]
     assert prompts == ['I search for "Dune"', 'I search for "Emma"']
     # Each example gets its own browser.
     assert [m for m, _ in project.methods()].count("start") == 2
@@ -161,14 +161,20 @@ def test_settings_reach_nova_act(project: NovaProject) -> None:
             When I click the button
             Then it worked
         """,
-        ini="nova_max_steps = 12\nnova_timeout = 60\nnova_headless = true\n",
+        ini="nova_max_steps = 12\nnova_verify_max_steps = 2\nnova_timeout = 60\nnova_headless = true\n",
     )
     project.run().assert_outcomes(passed=1)
     calls = project.calls()
     assert calls["started_with"] == [{"starting_page": "https://shop.example.com", "headless": True}]
-    for call in calls["calls"]:
-        if call["method"] in ("act", "act_get"):
-            assert call["kwargs"] == {"max_steps": 12, "timeout": 60}
+    act, verify = [c["kwargs"] for c in calls["calls"] if c["method"] == "act_get"]
+    assert {k: act[k] for k in ("max_steps", "timeout", "model_temperature")} == {
+        "max_steps": 12,
+        "timeout": 60,
+        "model_temperature": 0.0,
+    }
+    assert verify["max_steps"] == 2
+    assert isinstance(act["model_seed"], int)
+    assert act["model_seed"] != verify["model_seed"]
 
 
 def test_headed_flag_overrides_ini(project: NovaProject) -> None:
@@ -180,7 +186,7 @@ def test_headed_flag_overrides_ini(project: NovaProject) -> None:
 def test_then_mode_act(project: NovaProject) -> None:
     project.setup(feature=THEN_FEATURE, ini="nova_then_mode = act\n")
     project.run().assert_outcomes(passed=1)
-    assert ("act", "the cart shows 3 items") in project.methods()
+    assert ("act", "the cart shows 3 items") in project.steps()
 
 
 def test_bad_ini_value_is_a_usage_error(project: NovaProject) -> None:

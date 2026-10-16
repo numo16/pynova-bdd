@@ -41,15 +41,23 @@ def test_resolve_url() -> None:
         prompts.resolve_url("/cart", None)
 
 
-def test_action_prompt_plain() -> None:
-    assert prompts.action_prompt("  click login  ") == "click login"
+def test_step_body_plain() -> None:
+    assert prompts.step_body("  click login  ") == "click login"
 
 
 def test_empty_docstring_is_kept() -> None:
-    assert prompts.action_prompt("write", docstring="") == 'write\n\nUse the following text:\n"""\n\n"""'
+    assert prompts.step_body("write", docstring="") == 'write\n\nUse the following text:\n"""\n\n"""'
 
 
-def test_verify_prompt_contains_statement() -> None:
+def test_action_prompt_wraps_step_in_contract() -> None:
+    text = prompts.action_prompt("click login")
+    assert text.endswith("Step: click login")
+    assert "Do not look for another way" in text
+    assert "completed_as_written=false" in text
+
+
+def test_verify_prompt_is_observe_only() -> None:
     text = prompts.verify_prompt("the cart is empty")
     assert text.endswith("Statement: the cart is empty")
-    assert "passed=true or passed=false" in text
+    assert "Do not click, type" in text
+    assert 'verdict="unsure"' in text

@@ -10,6 +10,7 @@ import pytest
 
 AuthMode = Literal["auto", "api_key", "iam"]
 ThenMode = Literal["verify", "act"]
+SeedSetting = int | Literal["auto"] | None
 
 _AUTH_MODES: tuple[AuthMode, ...] = ("auto", "api_key", "iam")
 _THEN_MODES: tuple[ThenMode, ...] = ("verify", "act")
@@ -22,8 +23,15 @@ class NovaConfig:
     enabled: bool = True
     base_url: str | None = None
     headless: bool = False
-    max_steps: int | None = None
+    # Guardrails (docs/DESIGN.md §4.10). Small step budgets leave no room to improvise.
+    max_steps: int = 10
+    verify_max_steps: int = 3
     timeout: int | None = None
+    model_temperature: float | None = 0.0
+    model_seed: SeedSetting = "auto"
+    allowed_origins: tuple[str, ...] = ()
+    readonly_check: bool = True
+    literal_check: bool = True
     then_mode: ThenMode = "verify"
     auth: AuthMode = "auto"
     model_id: str = "nova-act-latest"
@@ -37,8 +45,17 @@ _INI_OPTIONS: tuple[tuple[str, str, str], ...] = (
     ("nova_enabled", "Route steps without a Python definition to Nova Act.", "true"),
     ("nova_base_url", "Base URL; relative URLs in navigation steps resolve against it.", ""),
     ("nova_headless", "Run the browser headless. Defaults to true when the CI env var is set.", ""),
-    ("nova_max_steps", "Maximum browser actions per Nova step (Nova Act default when empty).", ""),
+    ("nova_max_steps", "Maximum browser actions per Given/When step.", "10"),
+    ("nova_verify_max_steps", "Maximum browser actions per Then check (scrolling only).", "3"),
     ("nova_timeout", "Timeout in seconds per Nova step (Nova Act default when empty).", ""),
+    ("nova_model_temperature", "Model temperature for every step; 'none' leaves Nova's default.", "0"),
+    ("nova_model_seed", "'auto' (stable seed per test and step), an integer, or 'none'.", "auto"),
+    (
+        "nova_readonly_check",
+        "Fail a Then step if the page (URL, text, form values) changed while it was checked.",
+        "true",
+    ),
+    ("nova_literal_check", 'Quoted "text" in a Then step must appear on the page.', "true"),
     ("nova_then_mode", "How Then steps run: 'verify' (yes/no check) or 'act'.", "verify"),
     ("nova_auth", "Authentication: 'auto', 'api_key' or 'iam'.", "auto"),
     ("nova_model_id", "Nova Act model id used with IAM auth.", "nova-act-latest"),
@@ -51,6 +68,12 @@ _INI_OPTIONS: tuple[tuple[str, str, str], ...] = (
 def add_options(parser: pytest.Parser) -> None:
     for name, help_text, default in _INI_OPTIONS:
         parser.addini(name, help_text, default=default)
+    parser.addini(
+        "nova_allowed_origins",
+        "Extra origins Nova may navigate to (one per line), besides nova_base_url and visited URLs.",
+        type="linelist",
+        default=[],
+    )
 
     group = parser.getgroup("nova-bdd", "Nova Act for pytest-bdd")
     group.addoption(
@@ -117,6 +140,48 @@ def _parse_choice(name: str, value: str, choices: tuple[str, ...]) -> str:
     return lowered
 
 
+def _parse_float_or_none(name: str, value: str) -> float | None:
+    if value.strip().lower() in ("", "none"):
+        return None
+    try:
+        return float(value)
+    except ValueError:
+        raise pytest.UsageError(f"{name} must be a number or 'none', got {value!r}") from None
+
+
+def _parse_seed(value: str) -> SeedSetting:
+    lowered = value.strip().lower()
+    if lowered in ("", "none"):
+        return None
+    if lowered == "auto":
+        return "auto"
+    try:
+        return int(lowered)
+    except ValueError:
+        raise pytest.UsageError(
+            f"nova_model_seed must be 'auto', an integer or 'none', got {value!r}"
+        ) from None
+
+
+def _parse_origins(values: list[str]) -> tuple[str, ...]:
+    from pynova_bdd.guardrails import origin_of
+
+    origins = []
+    for value in values:
+        origin = origin_of(value.strip())
+        if origin is None:
+            raise pytest.UsageError(f"nova_allowed_origins entries must be http(s) URLs, got {value!r}")
+        origins.append(origin)
+    return tuple(origins)
+
+
+def _required_int(name: str, value: str) -> int:
+    parsed = _parse_int(name, value)
+    if parsed is None:
+        raise pytest.UsageError(f"{name} must be set to a positive integer")
+    return parsed
+
+
 def _ini(config: pytest.Config, name: str) -> str:
     value = config.getini(name)
     return str(value).strip() if value is not None else ""
@@ -150,8 +215,16 @@ def load_config(config: pytest.Config) -> NovaConfig:
         enabled=enabled,
         base_url=str(base_url) if base_url else None,
         headless=headless,
-        max_steps=_parse_int("nova_max_steps", _ini(config, "nova_max_steps")),
+        max_steps=_required_int("nova_max_steps", _ini(config, "nova_max_steps")),
+        verify_max_steps=_required_int("nova_verify_max_steps", _ini(config, "nova_verify_max_steps")),
         timeout=_parse_int("nova_timeout", _ini(config, "nova_timeout")),
+        model_temperature=_parse_float_or_none(
+            "nova_model_temperature", _ini(config, "nova_model_temperature")
+        ),
+        model_seed=_parse_seed(_ini(config, "nova_model_seed")),
+        allowed_origins=_parse_origins(list(config.getini("nova_allowed_origins"))),
+        readonly_check=_parse_bool("nova_readonly_check", _ini(config, "nova_readonly_check")),
+        literal_check=_parse_bool("nova_literal_check", _ini(config, "nova_literal_check")),
         then_mode=_parse_choice("nova_then_mode", _ini(config, "nova_then_mode"), _THEN_MODES),  # type: ignore[arg-type]
         auth=auth,  # type: ignore[arg-type]
         model_id=_ini(config, "nova_model_id") or "nova-act-latest",

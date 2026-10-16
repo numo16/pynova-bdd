@@ -75,9 +75,11 @@ def nova_client_factory(request: pytest.FixtureRequest, nova_config: NovaConfig)
 
 
 @pytest.fixture
-def nova_session(nova_config: NovaConfig, nova_client_factory: ClientFactory) -> Iterator[NovaSession]:
+def nova_session(
+    request: pytest.FixtureRequest, nova_config: NovaConfig, nova_client_factory: ClientFactory
+) -> Iterator[NovaSession]:
     """The scenario's Nova session; the browser starts on first use and stops at teardown."""
-    session = NovaSession(nova_config, nova_client_factory)
+    session = NovaSession(nova_config, nova_client_factory, test_id=request.node.nodeid)
     try:
         yield session
     finally:

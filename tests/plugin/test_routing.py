@@ -21,17 +21,14 @@ def test_unmatched_steps_go_to_nova(project: NovaProject) -> None:
     project.setup(feature=FEATURE)
     project.run().assert_outcomes(passed=1)
 
-    assert project.methods() == [
+    assert project.steps() == [
         ("start", "https://shop.example.com"),
         ("act", 'I search for "Dune"'),
         ("act", "I add the first result to the cart"),
-        ("act_get", project.calls()["calls"][3]["argument"]),
-        ("act_get", project.calls()["calls"][4]["argument"]),
+        ("verify", "the cart shows 1 item"),
+        ("verify", "the total is shown"),
         ("stop", None),
     ]
-    verify_prompts = [c["argument"] for c in project.calls()["calls"] if c["method"] == "act_get"]
-    assert verify_prompts[0].endswith("Statement: the cart shows 1 item")
-    assert verify_prompts[1].endswith("Statement: the total is shown")
 
 
 def test_navigation_step_skips_the_model(project: NovaProject) -> None:
@@ -71,7 +68,7 @@ def test_module_step_definition_wins(project: NovaProject) -> None:
         """,
     )
     project.run().assert_outcomes(passed=1)
-    prompts = [arg for _, arg in project.methods()]
+    prompts = [arg for _, arg in project.steps()]
     assert not any("Dune" in (p or "") for p in prompts)
     assert not any("cart shows" in (p or "") for p in prompts)
     assert any("I add the first result" in (p or "") for p in prompts)

@@ -166,21 +166,27 @@ therefore:
 
 ### 4.4 Then-steps as real assertions
 
-`verify()` calls:
+`verify()` asks Nova Act to observe, never act, and to return a structured verdict:
 
 ```python
 nova.act_get(
-  f"Look at the current page. Is the following statement true? {instruction}",
-  schema={"type": "object",
-          "properties": {"passed": {"type": "boolean"}, "evidence": {"type": "string"}},
-          "required": ["passed", "evidence"]},
+    verify_prompt(statement),  # "You are an observer... quote the exact text..."
+    schema={
+        "type": "object",
+        "properties": {
+            "verdict": {"type": "string", "enum": ["true", "false", "unsure"]},
+            "evidence": {"type": "array", "items": {"type": "string"}},
+        },
+        "required": ["verdict", "evidence"],
+    },
+    max_steps=3,
 )
 ```
 
-- `passed is True` → the step passes.
-- `passed is False` → `NovaAssertionFailed`, with the evidence and a screenshot path in the message.
-- Schema mismatch or invalid JSON → a failure (never a silent pass). The message is labeled as an agent error
-  so it is distinguishable from an assertion failure.
+- `"true"` passes only if the evidence is grounded and the page was left unchanged (§4.10, layers 3 and 4).
+- `"false"` and `"unsure"` → `NovaAssertionFailed`, with the quoted evidence in the message.
+- A schema mismatch or unknown verdict → `NovaVerificationError`, never a silent pass. It is labeled as an
+  agent error so it is distinguishable from an assertion failure.
 - A config switch, `nova_then_mode = act`, treats Then steps as actions instead, for teams that phrase them
   imperatively.
 
@@ -207,7 +213,14 @@ Precedence from lowest to highest: `pytest.ini`/`pyproject [tool.pytest.ini_opti
 | `nova_strict` / `--nova-strict` | `false` | Only scenarios tagged `@nova` may use Nova. |
 | `nova_base_url` / `--nova-base-url` | – | Relative URLs in `Given I am on "/cart"` resolve against this. |
 | `nova_headless` / `--nova-headless` | `true` in CI, otherwise `false` | Maps to `NovaAct(headless=)`. |
-| `nova_max_steps`, `nova_timeout` | Nova defaults | Per-step limits. The tag `@nova_max_steps(50)` overrides them per scenario. |
+| `nova_max_steps` | `10` | Browser actions per Given/When step (§4.10). The tag `@nova_max_steps(N)` (Phase 2) overrides it per scenario. |
+| `nova_verify_max_steps` | `3` | Browser actions per Then check (scrolling only). |
+| `nova_timeout` | Nova default | Seconds per step. |
+| `nova_model_temperature` | `0` | `none` leaves Nova's default. |
+| `nova_model_seed` | `auto` | `auto` = a stable seed per test and step; an integer; or `none`. |
+| `nova_allowed_origins` | – | Extra origins (one per line) the navigation fence allows. |
+| `nova_readonly_check` | `true` | Fail a Then step that changed the page. |
+| `nova_literal_check` | `true` | Quoted `"text"` in a positive Then step must be on the page. |
 | `nova_client_scope` | `function` | Clients are reused across scenarios only on request (faster, less isolated). |
 | `nova_record_video`, `nova_artifacts_dir` | `false`, `.nova-artifacts/` | Per-test subfolder named after the nodeid. |
 | `nova_auth` / `--nova-auth` | `auto` | `auto` \| `api_key` \| `iam`. See §4.9. |
@@ -281,7 +294,8 @@ layer is enforced by the plugin, not just requested in a prompt, wherever that i
   navigate, edit the URL, reload, open new tabs or do extra work; if the step can't be done exactly as written,
   stop and report failure instead of looking for a workaround.*
 - Action steps use `act_get` with a self-report schema
-  `{"completed_as_written": bool, "deviation": str | null}`. If the agent reports a deviation, the step fails.
+  `{"completed_as_written": bool, "deviation": str}` (`""` when none). If the agent reports a deviation,
+  the step fails.
   This is weak on its own, but it costs nothing and catches honest failures.
 - A tight step budget: `nova_max_steps` defaults to **10** for actions (Nova's default is 30) and **3** for
   verification. A larger budget is what allows improvisation.
@@ -295,8 +309,10 @@ layer is enforced by the plugin, not just requested in a prompt, wherever that i
 - A `state_guardrail` blocks any URL whose origin isn't in an allowlist. The allowlist defaults to the origins of
   `nova_base_url` and of URLs reached by explicit navigation steps. `nova_allowed_origins` extends it, for
   example to add an SSO provider.
-- Agent-driven URL changes are allowed only within allowed origins. A step tagged `@nova_no_navigation` (and
-  every Then step) fails if the URL changes at all.
+- Agent-driven URL changes are allowed only within allowed origins. During a Then check the fence is locked to
+  the current URL (ignoring the fragment), so any navigation is blocked. A `@nova_no_navigation` tag to lock
+  action steps the same way is planned with the other tags in Phase 2.
+- When the guardrail blocks a URL, the failure message names it and points to `nova_allowed_origins`.
 
 **Layer 3: read-only verification (enforced).** Fixes T4.
 - Before and after each Then check, the plugin takes a page fingerprint through Playwright: the URL, a hash of
@@ -363,11 +379,19 @@ layer is enforced by the plugin, not just requested in a prompt, wherever that i
 - Pulled forward from Phase 2: docstring/data-table prompts, `nova_base_url`, headless auto-detection (`$CI`).
 - ✅ Exit criteria: `pytest examples/` passes against real Nova locally, and plugin tests pass in CI.
 
-**Phase 1b — Determinism & guardrails** (§4.10, layers 1–4)
+**Phase 1b — Determinism & guardrails** (§4.10, layers 1–4), shipped with Phase 1
 - Strict step contract, self-report schema, tight default step budgets, temperature 0 with a seed per step.
 - Origin allowlist through `state_guardrail`; Then steps must not change the URL.
 - Read-only verification fingerprint; tri-state grounded verdicts; grounding and literal checks.
 - ✅ Exit criteria: pytester tests show each layer failing a scripted "cheating" agent (T1–T5).
+  See `tests/plugin/test_guardrails.py`.
+- Known limits, to measure in the first real e2e runs:
+  - The read-only check compares the full `innerText`, so pages that change by themselves (clocks, rotating
+    banners, lazy loading on scroll) will fail checks. Mitigation if it bites: a per-step tag that excludes a
+    region, or `nova_readonly_check = false`.
+  - The literal check skips statements with negation words ("not", "no longer", "hidden", ...) instead of
+    understanding them.
+  - Model-side `model_temperature` / `model_seed` behavior has not been verified against the live service.
 
 **Phase 2 — Control & ergonomics**
 - Tags/markers (`@nova`, `@no_nova`, `@nova_max_steps`), strict mode, env layer, `--nova-plan` dry run.

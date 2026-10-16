@@ -64,6 +64,19 @@ class NovaProject:
     def methods(self) -> list[tuple[str, str | None]]:
         return [(c["method"], c["argument"]) for c in self.calls()["calls"]]
 
+    def steps(self) -> list[tuple[str, str | None]]:
+        """Like methods(), but with act/act_get prompts reduced to the step text and labelled
+        "act" (Given/When, under the step contract) or "verify" (Then)."""
+        out: list[tuple[str, str | None]] = []
+        for method, arg in self.methods():
+            if method == "act_get" and arg and "Statement: " in arg:
+                out.append(("verify", arg.rsplit("Statement: ", 1)[1]))
+            elif method == "act_get" and arg and "Step: " in arg:
+                out.append(("act", arg.rsplit("Step: ", 1)[1]))
+            else:
+                out.append((method, arg))
+        return out
+
 
 @pytest.fixture
 def project(pytester: pytest.Pytester, monkeypatch: pytest.MonkeyPatch) -> NovaProject:

@@ -34,10 +34,32 @@ $ pytest
 |---|---|
 | Matches a Python step definition | Your function runs. It can use the `nova`, `nova_page` or `nova_session` fixtures. |
 | `Given/When I am on / navigate to / go to / open / visit <url>` | The browser goes straight to the URL, with no model call. Relative URLs (`/cart`) use `nova_base_url`. |
-| Any other `Given` / `When` | `nova.act(<step text>)`. A docstring or data table is appended to the prompt. |
-| `Then` | Nova Act checks the statement against the page and answers yes/no with evidence. A "no" fails the test with that evidence. |
+| Any other `Given` / `When` | Nova Act carries out the step under a strict contract (below). A docstring or data table is appended to the prompt. |
+| `Then` | Nova Act observes the page, without changing it, and answers true / false / unsure, quoting the page text it relied on. Only a grounded "true" passes. |
 
 Each scenario gets its own browser, started only when the first Nova step needs it.
+
+## Guardrails: a pass has to mean something
+
+An AI agent will happily "find a way" to finish a task. In a test, that would turn regressions into green runs.
+The plugin enforces these rules itself rather than only asking the agent nicely:
+
+- **Do exactly the step, or fail.** Actions run under a fixed contract: no typing URLs, no workarounds, no
+  extra fixes. They have a budget of 10 browser actions (Nova's default is 30), and the agent must report
+  whether it did the step exactly as written. Any reported deviation fails the step.
+- **Stay in the app.** A navigation fence blocks any origin other than `nova_base_url`, URLs you navigate to
+  explicitly, and `nova_allowed_origins`.
+- **Then checks are read-only.** The plugin snapshots the URL, page text and form values before and after each
+  check. If anything changed, the step fails whatever the verdict. During a check, navigation is blocked
+  entirely and the budget is 3 actions.
+- **Verdicts must be grounded.** `unsure` fails. A `true` must quote text, and each quote must really be on
+  the page. Quoted text in the step itself (`Then the list contains "Buy milk"`) is also checked against the
+  page, with no model involved.
+- **Repeatable by default.** Temperature 0 and a stable seed per test and step. There are no automatic
+  retries, because a flaky step should be made more specific or moved into Python.
+
+See [docs/DESIGN.md §4.10](docs/DESIGN.md) for the threat model and the remaining roadmap (evidence artifacts,
+path-drift baselines).
 
 ## Mixing in Python steps
 
@@ -64,8 +86,14 @@ from the standard boto chain, which needs `nova_workflow_definition`. You can fo
 [tool.pytest.ini_options]
 nova_base_url = "https://books.example.com"
 nova_headless = true            # defaults to true when $CI is set
-nova_max_steps = 30
+nova_max_steps = 10             # per Given/When step
+nova_verify_max_steps = 3       # per Then check
 nova_timeout = 120
+nova_model_temperature = 0      # "none" for Nova's default
+nova_model_seed = "auto"        # stable per test+step; or an int; or "none"
+nova_allowed_origins = ["https://login.example.com"]
+nova_readonly_check = true
+nova_literal_check = true
 nova_then_mode = "verify"       # or "act"
 nova_auth = "auto"              # auto | api_key | iam
 nova_workflow_definition = "my-suite"   # IAM only

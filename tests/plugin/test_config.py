@@ -25,8 +25,9 @@ def _cfg(pytester: pytest.Pytester, *args: str) -> dict[str, object]:
 def test_defaults(pytester: pytest.Pytester, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("CI", raising=False)
     import dataclasses
+    import json
 
-    assert _cfg(pytester) == dataclasses.asdict(NovaConfig())
+    assert _cfg(pytester) == json.loads(json.dumps(dataclasses.asdict(NovaConfig())))
 
 
 def test_ci_env_makes_headless_default(pytester: pytest.Pytester, monkeypatch: pytest.MonkeyPatch) -> None:
