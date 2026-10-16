@@ -15,10 +15,21 @@ from urllib.parse import urlsplit, urlunsplit
 # --- Layer 1: deterministic sampling ----------------------------------------------------------------
 
 
+_MAX_SEED = 0x7FFFFFFF  # 2**31 - 1: the largest non-negative signed 32-bit integer
+
+
 def derive_seed(test_id: str, step_text: str) -> int:
-    """A stable seed per test and step, so reruns of the same build sample the same way."""
+    """A stable seed per test and step, so reruns of the same build sample the same way.
+
+    Python's built-in ``hash()`` is randomized per process, so the seed comes from SHA-256 instead.
+    The first 4 bytes of the digest give an unsigned 32-bit number (0 to 2**32 - 1). Masking with
+    ``_MAX_SEED`` clears the top bit, leaving 0 to 2**31 - 1. That keeps the seed a non-negative
+    value that fits a signed 32-bit integer, the safest range for a model ``seed`` parameter (Nova
+    Act does not document its limit). The ``\\x00`` separator stops ("ab", "c") and ("a", "bc")
+    from producing the same input.
+    """
     digest = hashlib.sha256(f"{test_id}\x00{step_text}".encode()).digest()
-    return int.from_bytes(digest[:4], "big") & 0x7FFFFFFF
+    return int.from_bytes(digest[:4], "big") & _MAX_SEED
 
 
 # --- Layer 2: navigation fence ----------------------------------------------------------------------
