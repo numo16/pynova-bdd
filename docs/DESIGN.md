@@ -1,6 +1,6 @@
 # pynova-bdd — Design & Implementation Plan
 
-Status: **Draft for review** · Targets: `nova-act` 3.x, `pytest-bdd` 8.x–9.x, Python ≥ 3.10
+Status: **Approved direction** (decisions in §7) · Package: `pytest-nova-bdd` (import `pynova_bdd`) · Targets: `nova-act` 3.x, `pytest-bdd` ≥ 8.1, < 10, Python ≥ 3.10
 
 ## 1. Problem
 
@@ -108,7 +108,10 @@ examples/
 ```
 
 Packaging: `pyproject.toml` (hatchling), `[project.entry-points.pytest11] nova_bdd = "pynova_bdd.plugin"`.
-Dependencies: `pytest-bdd>=8,<10`, `nova-act>=3,<4`. Tooling: `uv`, `ruff`, `mypy`, GitHub Actions on 3.10–3.13.
+Distribution name `pytest-nova-bdd`, import package `pynova_bdd`.
+Dependencies: `pytest-bdd>=8.1,<10`, `nova-act>=3,<4`. Tooling: `uv`, `ruff`, `mypy`, GitHub Actions on 3.10–3.13,
+with a matrix axis for pytest-bdd 8.1.x and 9.x. The plugin must not touch pytest-bdd private attributes, because 9.0
+moved several of them into internal registries.
 
 ### 4.2 Step routing (the core mechanism)
 
@@ -178,7 +181,7 @@ nova.act_get(
 | Fixture | Scope | Purpose |
 |---|---|---|
 | `nova_config` | session | Resolved `NovaConfig` (ini + CLI + env). |
-| `nova_workflow` | session | Optional `nova_act.Workflow` for IAM auth, or `None` with an API key. |
+| `nova_workflow` | session | `nova_act.Workflow` (entered once per session) when auth resolves to IAM, otherwise `None`. |
 | `nova` | function (configurable: `scenario`/`module`/`session`) | Started `NovaAct` client, stopped at teardown. Lazy: no browser starts unless a step uses it. |
 | `nova_page` | function | Shortcut to `nova.page` (Playwright) for deterministic Python steps. |
 | `nova_runner` | function | Internal adapter that applies per-scenario settings, prompt building, error mapping, and logging. |
@@ -200,7 +203,9 @@ Precedence from lowest to highest: `pytest.ini`/`pyproject [tool.pytest.ini_opti
 | `nova_max_steps`, `nova_timeout` | Nova defaults | Per-step limits. The tag `@nova_max_steps(50)` overrides them per scenario. |
 | `nova_client_scope` | `function` | Clients are reused across scenarios only on request (faster, less isolated). |
 | `nova_record_video`, `nova_artifacts_dir` | `false`, `.nova-artifacts/` | Per-test subfolder named after the nodeid. |
-| `nova_model_id`, `nova_auth` | `api_key` | `iam` builds a session-scoped `Workflow`. |
+| `nova_auth` / `--nova-auth` | `auto` | `auto` \| `api_key` \| `iam`. See §4.10. |
+| `nova_model_id` | `nova-act-latest` | Passed to `Workflow` with IAM. |
+| `nova_aws_profile`, `nova_aws_region` | boto defaults | IAM only; become `boto_session_kwargs`. |
 | `nova_then_mode` | `verify` | `verify` \| `act`. |
 | `--nova-plan` | off | Dry run: collect only, then print which steps route to Python and which to Nova. No browser, no cost. |
 
@@ -231,7 +236,20 @@ and isn't a recognized secret pattern fails rather than sending it.
 - A terminal summary at session end reports how many steps went to Nova and how many to Python, total Nova
   time, and the slowest Nova steps.
 
-### 4.9 Parallelism & isolation
+### 4.9 Authentication
+
+Both modes are supported from Phase 1:
+
+- **API key**: `NOVA_ACT_API_KEY` (or `nova_api_key` ini, discouraged) is passed as `nova_act_api_key=`.
+- **IAM**: a session-scoped `nova_act.Workflow(model_id=..., boto_session_kwargs={profile_name, region_name})` is
+  entered once and passed as `workflow=` to every client. Credentials come from the standard boto chain (env,
+  profile, SSO, instance role).
+- **`auto` (default)**: use the API key if `NOVA_ACT_API_KEY` is set, otherwise IAM. If neither resolves, fail at
+  session start with one clear message instead of on the first Nova step. When no scenario would route a step to
+  Nova (for example, every step has Python definitions), we skip the check so offline suites still run.
+- Under xdist, each worker builds its own `Workflow`.
+
+### 4.10 Parallelism & isolation
 
 - Function-scoped clients use a fresh temporary `user_data_dir` each, so `pytest -n auto` works.
 - An optional `nova_storage_state` setting (a saved Playwright storage state / Nova `browser_auth`) lets a
@@ -253,7 +271,8 @@ and isn't a recognized secret pattern fails rather than sending it.
 - `pyproject.toml`, `src/` layout, entry point, ruff/mypy/pytest config, CI matrix (3.10–3.13), README stub.
 
 **Phase 1 — Walking skeleton** (the core value)
-- `NovaConfig` (ini + CLI only), `nova` fixture (function scope, API-key auth), catch-all given/when/then.
+- `NovaConfig` (ini + CLI only), `nova` fixture (function scope), catch-all given/when/then.
+- Auth: API key **and** IAM `Workflow`, with `auto` resolution (§4.9).
 - Then-steps through `act_get` and the boolean verdict schema. Deterministic `Given I am on <url>`.
 - Error mapping into readable failures.
 - `FakeNovaAct` and pytester tests, including the **routing-precedence test from §4.2**.
@@ -266,7 +285,7 @@ and isn't a recognized secret pattern fails rather than sending it.
 - `nova_client_scope`, `nova_base_url`, headless auto-detection.
 
 **Phase 3 — Production readiness**
-- Secrets (§4.7), IAM `Workflow` auth, storage-state reuse.
+- Secrets (§4.7), storage-state reuse.
 - Artifacts (screenshots, video, logs), terminal summary, pytest-html/Allure hooks.
 - xdist verification, docs site (mkdocs), first PyPI release (`0.1.0`).
 
@@ -276,14 +295,13 @@ and isn't a recognized secret pattern fails rather than sending it.
 - Async client support (`nova_act.asyncio`) to fit pytest-asyncio stacks.
 - Per-step result caching or "assert-only" smoke modes.
 
-## 7. Open questions
+## 7. Decisions
 
-1. **Package name**: `pynova-bdd` (repo) vs `pytest-nova-bdd` (the PyPI convention, which helps discovery).
-   Recommendation: publish as `pytest-nova-bdd`, import as `pynova_bdd`.
-2. **Default for unmatched steps**: send them to Nova by default (magic, which helps adoption) or require `@nova`
-   (explicit, which controls cost)? Recommendation: default on, with `--nova-strict` for CI cost control.
-3. **Then-step semantics**: is the verify/verdict approach (§4.4) the right default, or do you phrase Then steps
-   as actions?
-4. **Minimum versions**: support pytest-bdd 7.x too, or just 8+? 8+ shares the `gherkin-official` parser with
-   Nova's tooling and keeps the matching internals we rely on stable. Recommendation: 8+.
-5. **Auth focus**: is API key enough for v1, or is IAM/Workflow (the AWS-hosted path) needed early?
+1. **Package name**: publish as `pytest-nova-bdd`, import as `pynova_bdd`. The repo stays `pynova-bdd`.
+2. **Unmatched steps go to Nova by default.** This is a Nova framework, so routing through Nova is the expected
+   behavior. `--nova-strict` and `@no_nova` exist to opt out.
+3. **`Then` steps are yes/no verifications** (§4.4) by default. `nova_then_mode = act` remains an escape hatch.
+4. **pytest-bdd `>=8.1,<10`.** 8.1.x was the current release for about 22 months (Dec 2024 – Sep 2026) and is
+   what most projects run. 9.0 (2026-09-30) drops Python 3.9, moves private attributes into registries, and
+   fixes docstring and backslash handling. CI tests both. 7.x uses the old parser and is not supported.
+5. **Auth**: API key and IAM are both supported from Phase 1, with `auto` resolution (§4.9).
