@@ -1,0 +1,73 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      e2e:
+        description: "Also run the examples against the real Nova Act service"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.13"
+      - run: uv venv && uv pip install -e . ruff mypy
+      - run: uv run --no-sync ruff check .
+      - run: uv run --no-sync ruff format --check .
+      - run: uv run --no-sync mypy
+
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.10", "3.11", "3.12", "3.13"]
+        pytest-bdd: ["9.*"]
+        include:
+          # Oldest supported combination.
+          - python: "3.10"
+            pytest-bdd: "8.1.*"
+            pytest: "7.4.*"
+          - python: "3.13"
+            pytest-bdd: "8.1.*"
+    name: test (py${{ matrix.python }}, pytest-bdd ${{ matrix.pytest-bdd }}${{ matrix.pytest && format(', pytest {0}', matrix.pytest) || '' }})
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Install
+        run: |
+          uv venv
+          uv pip install -e . pytest-xdist "pytest-bdd==${{ matrix.pytest-bdd }}" ${{ matrix.pytest && format('"pytest=={0}"', matrix.pytest) || '' }}
+      - run: uv run --no-sync pytest -v
+
+  e2e:
+    if: github.event_name == 'workflow_dispatch' && inputs.e2e
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.13"
+      - run: uv venv && uv pip install -e .
+      - run: uv run --no-sync playwright install --with-deps chrome
+      - run: uv run --no-sync pytest tests/e2e -v -s
+        env:
+          NOVA_ACT_API_KEY: ${{ secrets.NOVA_ACT_API_KEY }}
+          CI: "true"

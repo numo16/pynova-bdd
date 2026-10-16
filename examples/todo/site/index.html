@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Todo</title>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 32rem; margin: 3rem auto; }
+    li.done span { text-decoration: line-through; color: #888; }
+    input[type=text] { width: 70%; padding: .4rem; }
+  </style>
+</head>
+<body>
+  <h1>Todo</h1>
+  <form id="new">
+    <input id="title" type="text" placeholder="What needs doing?" aria-label="New todo">
+    <button type="submit">Add</button>
+  </form>
+  <ul id="list"></ul>
+  <p id="counter">0 items left</p>
+  <script>
+    const list = document.getElementById("list");
+    const counter = document.getElementById("counter");
+    function refresh() {
+      const left = list.querySelectorAll("li:not(.done)").length;
+      counter.textContent = `${left} item${left === 1 ? "" : "s"} left`;
+    }
+    document.getElementById("new").addEventListener("submit", (event) => {
+      event.preventDefault();
+      const input = document.getElementById("title");
+      if (!input.value.trim()) return;
+      const item = document.createElement("li");
+      const box = document.createElement("input");
+      box.type = "checkbox";
+      box.setAttribute("aria-label", `Complete ${input.value}`);
+      box.addEventListener("change", () => { item.classList.toggle("done", box.checked); refresh(); });
+      const label = document.createElement("span");
+      label.textContent = input.value;
+      item.append(box, " ", label);
+      list.append(item);
+      input.value = "";
+      refresh();
+    });
+  </script>
+</body>
+</html>

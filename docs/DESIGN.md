@@ -115,18 +115,23 @@ moved several of them into internal registries.
 
 ### 4.2 Step routing (the core mechanism)
 
-The plugin registers one catch-all per step type at root scope:
+The plugin registers one catch-all per step type at root scope, in its own entry-point plugin module
+(`pynova_bdd.steps`) so it is registered before any conftest:
 
 ```python
-@given(parsers.re(r"(?P<instruction>.+)"), target_fixture=None)
-def _nova_given(instruction, nova_runner, request): nova_runner.action(instruction, request)
+_ANY = parsers.re(r"(?P<instruction>.+)")
 
-@when(parsers.re(r"(?P<instruction>.+)"))
-def _nova_when(instruction, nova_runner, request): nova_runner.action(instruction, request)
+@given(_ANY)
+def nova_given(instruction, request): ...  # -> nova_session.action(instruction, current_step)
 
-@then(parsers.re(r"(?P<instruction>.+)"))
-def _nova_then(instruction, nova_runner, request): nova_runner.verify(instruction, request)
+@when(_ANY)
+def nova_when(instruction, request): ...   # -> nova_session.action(instruction, current_step)
+
+@then(_ANY)
+def nova_then(instruction, request): ...   # -> nova_session.verify(instruction, current_step)
 ```
+
+The current `Step` (for its docstring and data table) is stashed on the test item by `pytest_bdd_before_step`.
 
 Because pytest-bdd picks the most specific scope, **any user step definition beats the catch-all**. Routing is
 therefore:
@@ -139,11 +144,10 @@ therefore:
 
 `And`/`But` inherit their type from the previous step, as pytest-bdd already does.
 
-> Risk to verify first in Phase 1: a step defined in a **root-level** `conftest.py` has the same scope path
-> (`""`) as the plugin. Ties are broken by registration order, and entry-point plugins register before
-> conftests, so the user step should still win. We pin this with a pytester test. If it doesn't hold, the
-> fallback is to register the catch-all from `pytest_bdd_step_func_lookup_error`-adjacent logic or to ask
-> users to install it with `from pynova_bdd import nova_steps` in a conftest.
+> Verified in Phase 1: a step defined in a **root-level** `conftest.py` has the same scope path (`""`) as the
+> plugin. Ties are broken by registration order, and entry-point plugins register before conftests, so the user
+> step wins. `tests/plugin/test_routing.py` pins this, along with test-module and nested-conftest steps, on
+> pytest-bdd 8.1 and 9.0.
 
 ### 4.3 Step → prompt
 
@@ -180,15 +184,14 @@ nova.act_get(
 
 | Fixture | Scope | Purpose |
 |---|---|---|
-| `nova_config` | session | Resolved `NovaConfig` (ini + CLI + env). |
+| `nova_config` | session | Resolved `NovaConfig` (ini + CLI; env layer in Phase 2). |
+| `nova_client_factory` | session | Builds an unstarted `NovaAct` with auth applied. Override it to customise `NovaAct` arguments or to plug in `pynova_bdd.testing.FakeNovaAct`. |
 | `nova_workflow` | session | `nova_act.Workflow` (entered once per session) when auth resolves to IAM, otherwise `None`. |
-| `nova` | function (configurable: `scenario`/`module`/`session`) | Started `NovaAct` client, stopped at teardown. Lazy: no browser starts unless a step uses it. |
+| `nova_session` | function | `NovaSession`: owns the scenario's client (started lazily on the first Nova step or `navigate()`, stopped at teardown), runs action/verify steps, and records them on `.results`. |
+| `nova` | function (configurable scope in Phase 2) | The started `NovaAct` client, for Python steps that call Nova Act directly. |
 | `nova_page` | function | Shortcut to `nova.page` (Playwright) for deterministic Python steps. |
-| `nova_runner` | function | Internal adapter that applies per-scenario settings, prompt building, error mapping, and logging. |
-| `nova_results` | function | List of `(step, ActResult)` for the scenario, for custom assertions or reporting. |
-
-Users can override `nova` (for example to point at a CDP endpoint, or to pass `state_guardrail`/`tools`)
-by redefining the fixture in their conftest.
+Users customise the client (for example a CDP endpoint, `state_guardrail` or `tools`) by overriding
+`nova_client_factory` in their conftest.
 
 ### 4.6 Configuration
 
@@ -240,13 +243,13 @@ and isn't a recognized secret pattern fails rather than sending it.
 
 Both modes are supported from Phase 1:
 
-- **API key**: `NOVA_ACT_API_KEY` (or `nova_api_key` ini, discouraged) is passed as `nova_act_api_key=`.
-- **IAM**: a session-scoped `nova_act.Workflow(model_id=..., boto_session_kwargs={profile_name, region_name})` is
-  entered once and passed as `workflow=` to every client. Credentials come from the standard boto chain (env,
+- **API key**: `NOVA_ACT_API_KEY` is passed as `nova_act_api_key=`. Keys are never read from ini files.
+- **IAM**: a session-scoped `nova_act.Workflow(model_id=..., workflow_definition_name=...,
+  boto_session_kwargs={profile_name, region_name})` is entered once and passed as `workflow=` to every client. Credentials come from the standard boto chain (env,
   profile, SSO, instance role).
-- **`auto` (default)**: use the API key if `NOVA_ACT_API_KEY` is set, otherwise IAM. If neither resolves, fail at
-  session start with one clear message instead of on the first Nova step. When no scenario would route a step to
-  Nova (for example, every step has Python definitions), we skip the check so offline suites still run.
+- **`auto` (default)**: use the API key if `NOVA_ACT_API_KEY` is set, otherwise IAM. If neither resolves, the first
+  step that needs Nova fails with one clear `NovaConfigError`. Auth is resolved lazily, so suites whose steps are
+  all Python never need credentials.
 - Under xdist, each worker builds its own `Workflow`.
 
 ### 4.10 Parallelism & isolation
@@ -277,12 +280,13 @@ Both modes are supported from Phase 1:
 - Error mapping into readable failures.
 - `FakeNovaAct` and pytester tests, including the **routing-precedence test from §4.2**.
 - `examples/` with one feature and one hybrid Python step.
+- Pulled forward from Phase 2: docstring/data-table prompts, `nova_base_url`, headless auto-detection (`$CI`).
 - ✅ Exit criteria: `pytest examples/` passes against real Nova locally, and plugin tests pass in CI.
 
 **Phase 2 — Control & ergonomics**
 - Tags/markers (`@nova`, `@no_nova`, `@nova_max_steps`), strict mode, env layer, `--nova-plan` dry run.
-- Docstring/data-table prompt rendering and prompt templates.
-- `nova_client_scope`, `nova_base_url`, headless auto-detection.
+- Prompt templates.
+- `nova_client_scope`.
 
 **Phase 3 — Production readiness**
 - Secrets (§4.7), storage-state reuse.
