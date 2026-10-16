@@ -210,7 +210,7 @@ Precedence from lowest to highest: `pytest.ini`/`pyproject [tool.pytest.ini_opti
 | `nova_max_steps`, `nova_timeout` | Nova defaults | Per-step limits. The tag `@nova_max_steps(50)` overrides them per scenario. |
 | `nova_client_scope` | `function` | Clients are reused across scenarios only on request (faster, less isolated). |
 | `nova_record_video`, `nova_artifacts_dir` | `false`, `.nova-artifacts/` | Per-test subfolder named after the nodeid. |
-| `nova_auth` / `--nova-auth` | `auto` | `auto` \| `api_key` \| `iam`. See §4.10. |
+| `nova_auth` / `--nova-auth` | `auto` | `auto` \| `api_key` \| `iam`. See §4.9. |
 | `nova_model_id` | `nova-act-latest` | Passed to `Workflow` with IAM. |
 | `nova_aws_profile`, `nova_aws_region` | boto defaults | IAM only; become `boto_session_kwargs`. |
 | `nova_then_mode` | `verify` | `verify` \| `act`. |
