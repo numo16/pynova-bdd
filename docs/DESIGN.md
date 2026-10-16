@@ -35,6 +35,10 @@ No step definitions are needed. Each step without a Python definition goes to No
 ## 2. Goals / non-goals
 
 **Goals**
+- **A test proves behavior or it fails.** Nova must never be able to "do whatever it takes" to get a green run.
+  It carries out exactly the step as written or fails, and it observes Then steps without changing anything.
+  Runs should be as repeatable as a model-driven tool allows, and each pass should leave evidence. This goal
+  outranks convenience (§4.10).
 - Run steps that have no Python definition through Nova Act, with no glue code.
 - Let Python and Nova steps sit side by side in one scenario. A Python step definition always wins over Nova.
 - Map Gherkin semantics correctly: `Given`/`When` are **actions**, and `Then` is an **assertion** that must
@@ -115,18 +119,23 @@ moved several of them into internal registries.
 
 ### 4.2 Step routing (the core mechanism)
 
-The plugin registers one catch-all per step type at root scope:
+The plugin registers one catch-all per step type at root scope, in its own entry-point plugin module
+(`pynova_bdd.steps`) so it is registered before any conftest:
 
 ```python
-@given(parsers.re(r"(?P<instruction>.+)"), target_fixture=None)
-def _nova_given(instruction, nova_runner, request): nova_runner.action(instruction, request)
+_ANY = parsers.re(r"(?P<instruction>.+)")
 
-@when(parsers.re(r"(?P<instruction>.+)"))
-def _nova_when(instruction, nova_runner, request): nova_runner.action(instruction, request)
+@given(_ANY)
+def nova_given(instruction, request): ...  # -> nova_session.action(instruction, current_step)
 
-@then(parsers.re(r"(?P<instruction>.+)"))
-def _nova_then(instruction, nova_runner, request): nova_runner.verify(instruction, request)
+@when(_ANY)
+def nova_when(instruction, request): ...   # -> nova_session.action(instruction, current_step)
+
+@then(_ANY)
+def nova_then(instruction, request): ...   # -> nova_session.verify(instruction, current_step)
 ```
+
+The current `Step` (for its docstring and data table) is stashed on the test item by `pytest_bdd_before_step`.
 
 Because pytest-bdd picks the most specific scope, **any user step definition beats the catch-all**. Routing is
 therefore:
@@ -139,11 +148,10 @@ therefore:
 
 `And`/`But` inherit their type from the previous step, as pytest-bdd already does.
 
-> Risk to verify first in Phase 1: a step defined in a **root-level** `conftest.py` has the same scope path
-> (`""`) as the plugin. Ties are broken by registration order, and entry-point plugins register before
-> conftests, so the user step should still win. We pin this with a pytester test. If it doesn't hold, the
-> fallback is to register the catch-all from `pytest_bdd_step_func_lookup_error`-adjacent logic or to ask
-> users to install it with `from pynova_bdd import nova_steps` in a conftest.
+> Verified in Phase 1: a step defined in a **root-level** `conftest.py` has the same scope path (`""`) as the
+> plugin. Ties are broken by registration order, and entry-point plugins register before conftests, so the user
+> step wins. `tests/plugin/test_routing.py` pins this, along with test-module and nested-conftest steps, on
+> pytest-bdd 8.1 and 9.0.
 
 ### 4.3 Step → prompt
 
@@ -158,21 +166,27 @@ therefore:
 
 ### 4.4 Then-steps as real assertions
 
-`verify()` calls:
+`verify()` asks Nova Act to observe, never act, and to return a structured verdict:
 
 ```python
 nova.act_get(
-  f"Look at the current page. Is the following statement true? {instruction}",
-  schema={"type": "object",
-          "properties": {"passed": {"type": "boolean"}, "evidence": {"type": "string"}},
-          "required": ["passed", "evidence"]},
+    verify_prompt(statement),  # "You are an observer... quote the exact text..."
+    schema={
+        "type": "object",
+        "properties": {
+            "verdict": {"type": "string", "enum": ["true", "false", "unsure"]},
+            "evidence": {"type": "array", "items": {"type": "string"}},
+        },
+        "required": ["verdict", "evidence"],
+    },
+    max_steps=3,
 )
 ```
 
-- `passed is True` → the step passes.
-- `passed is False` → `NovaAssertionFailed`, with the evidence and a screenshot path in the message.
-- Schema mismatch or invalid JSON → a failure (never a silent pass). The message is labeled as an agent error
-  so it is distinguishable from an assertion failure.
+- `"true"` passes only if the evidence is grounded and the page was left unchanged (§4.10, layers 3 and 4).
+- `"false"` and `"unsure"` → `NovaAssertionFailed`, with the quoted evidence in the message.
+- A schema mismatch or unknown verdict → `NovaVerificationError`, never a silent pass. It is labeled as an
+  agent error so it is distinguishable from an assertion failure.
 - A config switch, `nova_then_mode = act`, treats Then steps as actions instead, for teams that phrase them
   imperatively.
 
@@ -180,15 +194,14 @@ nova.act_get(
 
 | Fixture | Scope | Purpose |
 |---|---|---|
-| `nova_config` | session | Resolved `NovaConfig` (ini + CLI + env). |
+| `nova_config` | session | Resolved `NovaConfig` (ini + CLI; env layer in Phase 2). |
+| `nova_client_factory` | session | Builds an unstarted `NovaAct` with auth applied. Override it to customise `NovaAct` arguments or to plug in `pynova_bdd.testing.FakeNovaAct`. |
 | `nova_workflow` | session | `nova_act.Workflow` (entered once per session) when auth resolves to IAM, otherwise `None`. |
-| `nova` | function (configurable: `scenario`/`module`/`session`) | Started `NovaAct` client, stopped at teardown. Lazy: no browser starts unless a step uses it. |
+| `nova_session` | function | `NovaSession`: owns the scenario's client (started lazily on the first Nova step or `navigate()`, stopped at teardown), runs action/verify steps, and records them on `.results`. |
+| `nova` | function (configurable scope in Phase 2) | The started `NovaAct` client, for Python steps that call Nova Act directly. |
 | `nova_page` | function | Shortcut to `nova.page` (Playwright) for deterministic Python steps. |
-| `nova_runner` | function | Internal adapter that applies per-scenario settings, prompt building, error mapping, and logging. |
-| `nova_results` | function | List of `(step, ActResult)` for the scenario, for custom assertions or reporting. |
-
-Users can override `nova` (for example to point at a CDP endpoint, or to pass `state_guardrail`/`tools`)
-by redefining the fixture in their conftest.
+Users customise the client (for example a CDP endpoint, `state_guardrail` or `tools`) by overriding
+`nova_client_factory` in their conftest.
 
 ### 4.6 Configuration
 
@@ -200,10 +213,17 @@ Precedence from lowest to highest: `pytest.ini`/`pyproject [tool.pytest.ini_opti
 | `nova_strict` / `--nova-strict` | `false` | Only scenarios tagged `@nova` may use Nova. |
 | `nova_base_url` / `--nova-base-url` | – | Relative URLs in `Given I am on "/cart"` resolve against this. |
 | `nova_headless` / `--nova-headless` | `true` in CI, otherwise `false` | Maps to `NovaAct(headless=)`. |
-| `nova_max_steps`, `nova_timeout` | Nova defaults | Per-step limits. The tag `@nova_max_steps(50)` overrides them per scenario. |
+| `nova_max_steps` | `10` | Browser actions per Given/When step (§4.10). The tag `@nova_max_steps(N)` (Phase 2) overrides it per scenario. |
+| `nova_verify_max_steps` | `3` | Browser actions per Then check (scrolling only). |
+| `nova_timeout` | Nova default | Seconds per step. |
+| `nova_model_temperature` | `0` | `none` leaves Nova's default. |
+| `nova_model_seed` | `auto` | `auto` = a stable seed per test and step; an integer; or `none`. |
+| `nova_allowed_origins` | – | Extra origins (one per line) the navigation fence allows. |
+| `nova_readonly_check` | `true` | Fail a Then step that changed the page. |
+| `nova_literal_check` | `true` | Quoted `"text"` in a positive Then step must be on the page. |
 | `nova_client_scope` | `function` | Clients are reused across scenarios only on request (faster, less isolated). |
 | `nova_record_video`, `nova_artifacts_dir` | `false`, `.nova-artifacts/` | Per-test subfolder named after the nodeid. |
-| `nova_auth` / `--nova-auth` | `auto` | `auto` \| `api_key` \| `iam`. See §4.10. |
+| `nova_auth` / `--nova-auth` | `auto` | `auto` \| `api_key` \| `iam`. See §4.9. |
 | `nova_model_id` | `nova-act-latest` | Passed to `Workflow` with IAM. |
 | `nova_aws_profile`, `nova_aws_region` | boto defaults | IAM only; become `boto_session_kwargs`. |
 | `nova_then_mode` | `verify` | `verify` \| `act`. |
@@ -240,16 +260,95 @@ and isn't a recognized secret pattern fails rather than sending it.
 
 Both modes are supported from Phase 1:
 
-- **API key**: `NOVA_ACT_API_KEY` (or `nova_api_key` ini, discouraged) is passed as `nova_act_api_key=`.
-- **IAM**: a session-scoped `nova_act.Workflow(model_id=..., boto_session_kwargs={profile_name, region_name})` is
-  entered once and passed as `workflow=` to every client. Credentials come from the standard boto chain (env,
+- **API key**: `NOVA_ACT_API_KEY` is passed as `nova_act_api_key=`. Keys are never read from ini files.
+- **IAM**: a session-scoped `nova_act.Workflow(model_id=..., workflow_definition_name=...,
+  boto_session_kwargs={profile_name, region_name})` is entered once and passed as `workflow=` to every client. Credentials come from the standard boto chain (env,
   profile, SSO, instance role).
-- **`auto` (default)**: use the API key if `NOVA_ACT_API_KEY` is set, otherwise IAM. If neither resolves, fail at
-  session start with one clear message instead of on the first Nova step. When no scenario would route a step to
-  Nova (for example, every step has Python definitions), we skip the check so offline suites still run.
+- **`auto` (default)**: use the API key if `NOVA_ACT_API_KEY` is set, otherwise IAM. If neither resolves, the first
+  step that needs Nova fails with one clear `NovaConfigError`. Auth is resolved lazily, so suites whose steps are
+  all Python never need credentials.
 - Under xdist, each worker builds its own `Workflow`.
 
-### 4.10 Parallelism & isolation
+### 4.10 Determinism & guardrails
+
+The goal is less maintenance and flakiness than selector-based tests, **without** losing the guarantee that a
+pass means the app behaved as specified. The main risk is an agent that improvises, for example by searching
+for another route when a button is missing, editing the URL, filling extra fields, or interacting with the page
+during a Then check, and so turns a real regression into a green run. The guardrails below are layered. Each
+layer is enforced by the plugin, not just requested in a prompt, wherever that is possible.
+
+**Threat model: ways a Nova step could pass when it shouldn't**
+
+| # | Failure mode | Example |
+|---|---|---|
+| T1 | The action takes a workaround. | "Click *Add to cart*" is missing, so the agent opens the product page and uses a different button. |
+| T2 | The action leaves the app or edits the URL. | The agent goes to `/cart?add=123` directly, or follows an off-site link. |
+| T3 | The action does more than asked. | The agent also dismisses an error dialog, or fills optional fields. |
+| T4 | The Then step changes the page so the statement becomes true. | To check "cart shows 3 items", the agent adds two more items. |
+| T5 | The Then step hallucinates or is lenient. | The agent says "yes, the total is shown" when it isn't, or the evidence is invented. |
+| T6 | Results differ between runs. | The same build passes, then fails, then passes. |
+| T7 | Silent drift. | The agent's path through the app changes over time, which can hide a UX regression, and nobody notices. |
+
+**Layer 1: a strict step contract (prompts + limits).** Fixes T1, T3 and T6.
+- Every action prompt is wrapped in a fixed contract: *do exactly this one step with the visible UI; don't
+  navigate, edit the URL, reload, open new tabs or do extra work; if the step can't be done exactly as written,
+  stop and report failure instead of looking for a workaround.*
+- Action steps use `act_get` with a self-report schema
+  `{"completed_as_written": bool, "deviation": str}` (`""` when none). If the agent reports a deviation,
+  the step fails.
+  This is weak on its own, but it costs nothing and catches honest failures.
+- A tight step budget: `nova_max_steps` defaults to **10** for actions (Nova's default is 30) and **3** for
+  verification. A larger budget is what allows improvisation.
+- Deterministic sampling by default: `model_temperature=0` and a fixed `model_seed` per step, derived from a
+  hash of the nodeid and step text. Both can be changed in ini. *Still to verify against the service: Nova Act
+  passes these through without client-side validation.*
+- Human hand-off stays disabled: Nova's default human-input tools raise errors, and the plugin treats that as a
+  step failure, never as a prompt to a person.
+
+**Layer 2: navigation fence (enforced).** Fixes T2.
+- A `state_guardrail` blocks any URL whose origin isn't in an allowlist. The allowlist defaults to the origins of
+  `nova_base_url` and of URLs reached by explicit navigation steps. `nova_allowed_origins` extends it, for
+  example to add an SSO provider.
+- Agent-driven URL changes are allowed only within allowed origins. During a Then check the fence is locked to
+  the current URL (ignoring the fragment), so any navigation is blocked. A `@nova_no_navigation` tag to lock
+  action steps the same way is planned with the other tags in Phase 2.
+- When the guardrail blocks a URL, the failure message names it and points to `nova_allowed_origins`.
+
+**Layer 3: read-only verification (enforced).** Fixes T4.
+- Before and after each Then check, the plugin takes a page fingerprint through Playwright: the URL, a hash of
+  `document.body.innerText`, and the values of form fields. If anything other than the scroll position changed,
+  the step fails with `NovaVerificationError("verification modified the page")`, whatever the verdict was.
+- Combined with the 3-step budget and the "observe only" prompt, the verifier can't act its way to a pass.
+
+**Layer 4: grounded verdicts (enforced).** Fixes T5.
+- The verdict schema is `{"verdict": "true" | "false" | "unsure", "evidence": [quoted text...]}`. `unsure`
+  fails the step, so uncertainty never passes.
+- **Grounding check:** a `true` verdict must quote text that really is on the page. The plugin checks each quote
+  against the page's `innerText` with whitespace normalized. A quote that doesn't appear fails the step as
+  ungrounded.
+- **Literal check:** every quoted string in the Then step itself (for example `the list contains "Buy milk"`)
+  must also appear in the page text. This is a deterministic check that needs no model.
+- Optional `nova_verify_votes = N` (default 1) asks N times and requires a unanimous `true`. Disagreement fails
+  as `nondeterministic`, so the instability is reported rather than hidden.
+
+**Layer 5: evidence & drift detection.** Fixes T6 and T7, and provides the proof of quality.
+- Every Nova step records evidence: before and after screenshots, the trajectory (`replayable=True`), the
+  prompt, the verdict and its quotes. The evidence is attached to the test report (§4.8). A green run shows what
+  happened, not just that it passed.
+- **Path baselines (opt-in, `nova_baseline_dir`):** after a run that passes, the plugin stores each step's action
+  path: the action types, the target labels, the URLs visited, and the step count. Later runs compare against the
+  stored path, and a material difference (new URL path, step count beyond tolerance, different target element)
+  is reported as **drift**. `nova_drift = warn | fail`. `--nova-update-baselines` accepts the new paths, much like
+  snapshot testing.
+- **No automatic retries.** Retries hide nondeterminism. A flaky Nova step is a signal to make the step more
+  specific, or to move it to a Python step with exact selectors.
+
+**Escape hatches and authoring guidance**
+- Steps that need exactness (secrets, money amounts, things a Then step must compare precisely) belong in Python
+  steps, which always take precedence.
+- `--nova-plan` (Phase 2) will also flag vague steps, such as ones containing "whatever", "somehow" or "any way".
+
+### 4.11 Parallelism & isolation
 
 - Function-scoped clients use a fresh temporary `user_data_dir` each, so `pytest -n auto` works.
 - An optional `nova_storage_state` setting (a saved Playwright storage state / Nova `browser_auth`) lets a
@@ -277,16 +376,33 @@ Both modes are supported from Phase 1:
 - Error mapping into readable failures.
 - `FakeNovaAct` and pytester tests, including the **routing-precedence test from §4.2**.
 - `examples/` with one feature and one hybrid Python step.
+- Pulled forward from Phase 2: docstring/data-table prompts, `nova_base_url`, headless auto-detection (`$CI`).
 - ✅ Exit criteria: `pytest examples/` passes against real Nova locally, and plugin tests pass in CI.
+
+**Phase 1b — Determinism & guardrails** (§4.10, layers 1–4), shipped with Phase 1
+- Strict step contract, self-report schema, tight default step budgets, temperature 0 with a seed per step.
+- Origin allowlist through `state_guardrail`; Then steps must not change the URL.
+- Read-only verification fingerprint; tri-state grounded verdicts; grounding and literal checks.
+- ✅ Exit criteria: pytester tests show each layer failing a scripted "cheating" agent (T1–T5).
+  See `tests/plugin/test_guardrails.py`.
+- Known limits, to measure in the first real e2e runs:
+  - The read-only check compares the full `innerText`, so pages that change by themselves (clocks, rotating
+    banners, lazy loading on scroll) will fail checks. Mitigation if it bites: a per-step tag that excludes a
+    region, or `nova_readonly_check = false`.
+  - The literal check skips statements with negation words ("not", "no longer", "hidden", ...) instead of
+    understanding them.
+  - Model-side `model_temperature` / `model_seed` behavior has not been verified against the live service.
 
 **Phase 2 — Control & ergonomics**
 - Tags/markers (`@nova`, `@no_nova`, `@nova_max_steps`), strict mode, env layer, `--nova-plan` dry run.
-- Docstring/data-table prompt rendering and prompt templates.
-- `nova_client_scope`, `nova_base_url`, headless auto-detection.
+- Prompt templates.
+- `nova_client_scope`.
 
 **Phase 3 — Production readiness**
 - Secrets (§4.7), storage-state reuse.
-- Artifacts (screenshots, video, logs), terminal summary, pytest-html/Allure hooks.
+- Evidence artifacts (screenshots, trajectories, verdict quotes, video, logs), terminal summary, pytest-html/Allure
+  hooks.
+- Path baselines and drift detection (§4.10 layer 5), `nova_verify_votes`.
 - xdist verification, docs site (mkdocs), first PyPI release (`0.1.0`).
 
 **Phase 4 — Later ideas**
